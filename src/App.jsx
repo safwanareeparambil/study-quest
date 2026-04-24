@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { supabase } from './lib/supabaseClient'
 import { consolationFacts } from './data/consolationFacts'
 import { pickWeightedReward } from './utils/weightedReward'
 
 const WEEKLY_GOAL_HOURS = 20
+const SLOT_SYMBOLS = ['7', 'BAR', 'STAR', 'GEM', 'LUCK', 'XP']
 
 const tabs = ['Dashboard', 'Exams', 'Habits', 'The Vault', 'Spinner']
 
@@ -59,6 +60,27 @@ function formatDbError(action, error) {
   return `${action} failed: ${error.message}`
 }
 
+function playTone(audioContext, frequency, duration, type = 'sine', gainValue = 0.04) {
+  const oscillator = audioContext.createOscillator()
+  const gainNode = audioContext.createGain()
+
+  oscillator.type = type
+  oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime)
+
+  gainNode.gain.setValueAtTime(gainValue, audioContext.currentTime)
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + duration)
+
+  oscillator.connect(gainNode)
+  gainNode.connect(audioContext.destination)
+
+  oscillator.start()
+  oscillator.stop(audioContext.currentTime + duration)
+}
+
+function randomSlotSymbols() {
+  return Array.from({ length: 3 }, () => SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)])
+}
+
 function App() {
   const [session, setSession] = useState(null)
   const [loadingAuth, setLoadingAuth] = useState(true)
@@ -85,6 +107,11 @@ function App() {
   const [spinning, setSpinning] = useState(false)
   const [rewardHitRate, setRewardHitRate] = useState(80)
   const [dbError, setDbError] = useState('')
+  const [slotReels, setSlotReels] = useState(['SPIN', 'TO', 'WIN'])
+  const [slotMode, setSlotMode] = useState('idle')
+  const audioContextRef = useRef(null)
+  const spinTickIntervalRef = useRef(null)
+  const reelIntervalRef = useRef(null)
 
   useEffect(() => {
     let mounted = true
@@ -109,6 +136,17 @@ function App() {
     return () => {
       mounted = false
       subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (spinTickIntervalRef.current) {
+        window.clearInterval(spinTickIntervalRef.current)
+      }
+      if (reelIntervalRef.current) {
+        window.clearInterval(reelIntervalRef.current)
+      }
     }
   }, [])
 
@@ -412,23 +450,97 @@ function App() {
     setDbError('')
   }
 
+  async function getAudioContext() {
+    if (!audioContextRef.current) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext
+      if (!AudioContextClass) {
+        return null
+      }
+      audioContextRef.current = new AudioContextClass()
+    }
+
+    if (audioContextRef.current.state === 'suspended') {
+      await audioContextRef.current.resume()
+    }
+
+    return audioContextRef.current
+  }
+
+  async function startSpinSound() {
+    const ctx = await getAudioContext()
+    if (!ctx) {
+      return
+    }
+
+    let tick = 0
+    spinTickIntervalRef.current = window.setInterval(() => {
+      const freq = 360 + (tick % 8) * 28
+      playTone(ctx, freq, 0.08, 'square', 0.025)
+      tick += 1
+    }, 120)
+  }
+
+  function stopSpinSound() {
+    if (spinTickIntervalRef.current) {
+      window.clearInterval(spinTickIntervalRef.current)
+      spinTickIntervalRef.current = null
+    }
+  }
+
+  async function playResultSound(type) {
+    const ctx = await getAudioContext()
+    if (!ctx) {
+      return
+    }
+
+    if (type === 'reward') {
+      playTone(ctx, 523.25, 0.12, 'triangle', 0.05)
+      window.setTimeout(() => playTone(ctx, 659.25, 0.12, 'triangle', 0.05), 120)
+      window.setTimeout(() => playTone(ctx, 783.99, 0.18, 'triangle', 0.05), 240)
+    } else {
+      playTone(ctx, 240, 0.14, 'sawtooth', 0.03)
+      window.setTimeout(() => playTone(ctx, 196, 0.2, 'sawtooth', 0.025), 130)
+    }
+  }
+
   function spinForReward() {
     if (spinning) {
       return
     }
 
     setSpinning(true)
+    setSlotMode('rolling')
+    setSpinResult(null)
+    setSlotReels(randomSlotSymbols())
     setSpinnerRotation((prev) => prev + 1800 + Math.floor(Math.random() * 1080))
+    void startSpinSound()
+
+    reelIntervalRef.current = window.setInterval(() => {
+      setSlotReels(randomSlotSymbols())
+    }, 100)
 
     window.setTimeout(() => {
+      stopSpinSound()
+      if (reelIntervalRef.current) {
+        window.clearInterval(reelIntervalRef.current)
+        reelIntervalRef.current = null
+      }
+
       const hit = rewards.length > 0 && Math.random() <= rewardHitRate / 100
       if (hit) {
         const reward = pickWeightedReward(rewards)
-        setSpinResult({ type: 'reward', text: reward?.name ?? 'Try again!' })
+        const text = reward?.name ?? 'Try again!'
+        setSpinResult({ type: 'reward', text })
+        setSlotReels(['WIN', 'WIN', 'WIN'])
+        void playResultSound('reward')
       } else {
         const fact = consolationFacts[Math.floor(Math.random() * consolationFacts.length)]
         setSpinResult({ type: 'fact', text: fact })
+        setSlotReels(['FACT', 'BONUS', 'DROP'])
+        void playResultSound('fact')
       }
+
+      setSlotMode('result')
       setSpinning(false)
     }, 2300)
   }
@@ -780,6 +892,15 @@ function App() {
 
           <div className="mt-6 flex flex-col items-center gap-5">
             <div className="relative h-48 w-48">
+              {Array.from({ length: 12 }).map((_, index) => (
+                <span
+                  key={`light-${index}`}
+                  className={`absolute left-1/2 top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full ${
+                    spinning ? 'animate-pulse bg-amber-300 shadow-[0_0_10px_#fbbf24]' : 'bg-slate-300'
+                  }`}
+                  style={{ transform: `translate(-50%, -50%) rotate(${index * 30}deg) translateY(-106px)` }}
+                />
+              ))}
               <motion.div
                 animate={{ rotate: spinnerRotation }}
                 transition={{ duration: 2.2, ease: [0.15, 0.65, 0.2, 1] }}
@@ -797,6 +918,37 @@ function App() {
               {spinning ? 'Spinning...' : 'Spin'}
             </button>
 
+            <div className="w-full max-w-xl rounded-2xl border border-slate-700 bg-slate-900 p-4 text-white shadow-[inset_0_0_30px_rgba(255,255,255,0.08)]">
+              <div className="mb-3 flex items-center justify-between text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+                <span>Slot Announcement</span>
+                <span className={spinning ? 'text-amber-300 animate-pulse' : 'text-emerald-300'}>
+                  {spinning ? 'Rolling Reels' : 'Ready'}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {slotReels.map((symbol, index) => (
+                  <motion.div
+                    key={`${symbol}-${index}-${slotMode}`}
+                    className="rounded-xl border border-slate-600 bg-slate-800 py-4 text-center text-xl font-black tracking-wider text-amber-200"
+                    animate={
+                      slotMode === 'rolling'
+                        ? { y: [-8, 8, -8], opacity: [0.75, 1, 0.75] }
+                        : slotMode === 'result'
+                          ? { scale: [1, 1.12, 1], opacity: [0.85, 1, 1] }
+                          : { y: 0, scale: 1, opacity: 1 }
+                    }
+                    transition={
+                      slotMode === 'rolling'
+                        ? { duration: 0.22, repeat: Infinity, delay: index * 0.05 }
+                        : { duration: 0.35 }
+                    }
+                  >
+                    {symbol}
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+
             <AnimatePresence mode="wait">
               {spinResult ? (
                 <motion.div
@@ -804,16 +956,18 @@ function App() {
                   initial={{ opacity: 0, y: 20, scale: 0.92 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: -12 }}
-                  className={`rounded-xl px-4 py-3 text-center ${
-                    spinResult.type === 'reward' ? 'bg-emerald-100 text-emerald-900' : 'bg-sky-100 text-sky-900'
+                  className={`w-full max-w-xl rounded-xl border px-4 py-3 text-center ${
+                    spinResult.type === 'reward'
+                      ? 'border-emerald-300 bg-emerald-100 text-emerald-900 shadow-[0_0_18px_rgba(16,185,129,0.45)]'
+                      : 'border-sky-300 bg-sky-100 text-sky-900 shadow-[0_0_18px_rgba(56,189,248,0.35)]'
                   }`}
                 >
                   {spinResult.type === 'reward' ? (
-                    <p>
+                    <p className="text-lg font-bold uppercase tracking-wide">
                       You won: <span className="font-bold">{spinResult.text}</span>
                     </p>
                   ) : (
-                    <p>Consolation Fact: {spinResult.text}</p>
+                    <p className="text-sm sm:text-base">Consolation Fact: {spinResult.text}</p>
                   )}
                 </motion.div>
               ) : null}

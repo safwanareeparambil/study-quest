@@ -22,6 +22,14 @@ function getWeekStart(date = new Date()) {
   return d
 }
 
+function toLocalDateKey(value) {
+  const d = new Date(value)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 function SimplePieChart({ completed, total }) {
   const percent = total === 0 ? 0 : (completed / total) * 100
   const circumference = 2 * Math.PI * 45
@@ -202,6 +210,43 @@ function App() {
   }, [studyLogs])
 
   const maxDailyHours = Math.max(1, ...weeklySeries.map((day) => day.hours))
+
+  const dailyStudySummary = useMemo(() => {
+    const grouped = new Map()
+
+    for (const log of studyLogs) {
+      const dayKey = toLocalDateKey(log.studied_at)
+      if (!grouped.has(dayKey)) {
+        grouped.set(dayKey, {
+          dayKey,
+          dateLabel: new Date(log.studied_at).toLocaleDateString([], {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+          }),
+          totalHours: 0,
+          entries: [],
+        })
+      }
+
+      const item = grouped.get(dayKey)
+      item.totalHours += Number(log.hours || 0)
+      item.entries.push(log)
+    }
+
+    return Array.from(grouped.values())
+      .map((day) => ({
+        ...day,
+        entries: day.entries.sort((a, b) => new Date(b.studied_at) - new Date(a.studied_at)),
+      }))
+      .sort((a, b) => new Date(`${b.dayKey}T00:00:00`) - new Date(`${a.dayKey}T00:00:00`))
+  }, [studyLogs])
+
+  const todayStudyTotal = useMemo(() => {
+    const todayKey = toLocalDateKey(new Date())
+    const todaySummary = dailyStudySummary.find((day) => day.dayKey === todayKey)
+    return todaySummary ? todaySummary.totalHours : 0
+  }, [dailyStudySummary])
 
   const todayHabits = useMemo(() => {
     const today = getTodayISO()
@@ -691,6 +736,42 @@ function App() {
                   )
                 })}
               </div>
+            </div>
+
+            <div className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate-700">Study Log Timeline</p>
+                <p className="text-xs font-semibold text-slate-600">Today: {todayStudyTotal.toFixed(2)}h</p>
+              </div>
+
+              {dailyStudySummary.length === 0 ? (
+                <p className="mt-3 text-sm text-slate-500">No logs yet. Add hours to start your timeline.</p>
+              ) : (
+                <div className="mt-3 grid gap-3">
+                  {dailyStudySummary.map((day) => (
+                    <div key={day.dayKey} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold text-slate-800">{day.dateLabel}</p>
+                        <p className="text-sm font-bold text-slate-700">{day.totalHours.toFixed(2)} h</p>
+                      </div>
+
+                      <ul className="mt-2 grid gap-1">
+                        {day.entries.map((entry) => (
+                          <li key={entry.id} className="flex items-center justify-between text-xs text-slate-600">
+                            <span>
+                              {new Date(entry.studied_at).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                            <span className="font-semibold text-slate-700">{Number(entry.hours || 0).toFixed(2)} h</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
 
